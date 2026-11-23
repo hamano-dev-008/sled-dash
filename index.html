@@ -277,6 +277,54 @@ const sfx = {
   ding() { tone('sine', 1320, 1310, .5, .08); tone('sine', 1980, 1970, .35, .04, .03); }
 };
 
+// ---------- snow sliding sound (generated noise, no file) ----------
+let slide = null;
+function noiseBuffer(sec) {
+  const b = ac.createBuffer(1, Math.floor(ac.sampleRate * sec), ac.sampleRate), d = b.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < d.length; i++) { const w = Math.random() * 2 - 1; last = (last + .04 * w) / 1.04; d[i] = w * .6 + last * 3; } // white + a little brown
+  return b;
+}
+function initSlide() {
+  if (slide || !ac) return;
+  const src = ac.createBufferSource(); src.buffer = noiseBuffer(2.5); src.loop = true;
+  // runners: a bright hiss
+  const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 700;
+  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = .7;
+  const hiss = ac.createGain(); hiss.gain.value = 0;
+  // crunch: lower, grainy layer whose level flickers
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+  const crunch = ac.createGain(); crunch.gain.value = 0;
+  const out = ac.createGain(); out.gain.value = 0;
+  src.connect(hp); hp.connect(bp); bp.connect(hiss); hiss.connect(out);
+  src.connect(lp); lp.connect(crunch); crunch.connect(out);
+  out.connect(ac.destination); src.start();
+  slide = { src, bp, lp, hiss, crunch, out };
+}
+function updateSlide(rdt) {
+  if (!slide) return;
+  const t = ac.currentTime;
+  let level = 0;
+  if ((mode === 'race' || mode === 'finish') && !muted && ducks.length) {
+    const moving = ducks.filter(d => gnow >= d.t0 && gnow <= d.t0 + d.dur && Math.abs(d.to - d.from) > .001).length / ducks.length;
+    const speed = clamp(scrollSpeed / Math.max(1, W / Math.max(1, trackSec)), 0, 1.2);
+    level = .09 * (.35 + .65 * moving) * (.3 + .7 * speed) * (.55 + .45 * timeScale);
+  }
+  slide.out.gain.setTargetAtTime(level, t, .12);
+  slide.hiss.gain.setTargetAtTime(.9, t, .2);
+  slide.crunch.gain.setTargetAtTime(level > 0 ? .35 + Math.random() * .9 : 0, t, .03); // flicker = crunchy grains
+  slide.bp.frequency.setTargetAtTime(1500 + 1500 * timeScale + Math.random() * 300, t, .08); // deeper in slow-mo
+  slide.lp.frequency.setTargetAtTime(500 + 500 * timeScale, t, .1);
+}
+function whoosh() {
+  if (muted || !ac) return;
+  const t = ac.currentTime, src = ac.createBufferSource(); src.buffer = noiseBuffer(.6);
+  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+  bp.frequency.setValueAtTime(500, t); bp.frequency.exponentialRampToValueAtTime(3200, t + .35);
+  const g = ac.createGain(); g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.16, t + .12); g.gain.exponentialRampToValueAtTime(.0001, t + .5);
+  src.connect(bp); bp.connect(g); g.connect(ac.destination); src.start(t); src.stop(t + .6);
+}
+
 // ---------- background music ----------
 const bgm = $('bgm'); bgm.volume = .35;
 let musicOn = true;
@@ -354,7 +402,7 @@ function updateCamera(rnow, rdt) {
     const rem = raceStart + raceMs - gnow;
     if (rem < 3000) focus = ducks.reduce((a, b) => (frontOf(b) > frontOf(a) ? b : a)); // whoever is closest to the line
   } else if (mode === 'finish' && winners.length && rnow - finishAtReal < 1500) focus = winners[0];
-  if (focus && focus !== camTarget) { if (camTarget) whipUntil = rnow + 450; camTarget = focus; } // a quick whip-pan when the leader changes
+  if (focus && focus !== camTarget) { if (camTarget) { whipUntil = rnow + 450; whoosh(); } camTarget = focus; } // a quick whip-pan when the leader changes
   camOn = !!focus;
   let tx = W / 2, ty = H / 2, tz = 1;
   if (focus) {
@@ -389,7 +437,7 @@ function startRace(list) {
   trackSec = rnd(5, 8); targetScroll = W / trackSec; startLineX = .12;
   mode = 'race'; lastSec = -1; nextQuack = now + rnd(1500, 3000);
   ducks.forEach(d => nextSwim(d, now));
-  audio(); sfx.horn();
+  audio(); initSlide(); sfx.horn();
   const hp = $('hudPrize');
   if (racePrizes.length) {
     hp.hidden = false;
@@ -742,6 +790,7 @@ function frame(rnow) {
   }
   ducks.forEach(d => updateDuck(d, now));
   updateCamera(rnow, rdt);
+  updateSlide(rdt);
 
   ctx.save(); applyCamera();
   drawBackground(now);
