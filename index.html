@@ -338,7 +338,7 @@ function updateDuck(d, now) {
   d.x = d.from + (d.to - d.from) * ease(p);
   if (p >= 1) {
     if (d.queue && d.queue.length) { const q = d.queue.shift(); moveTo(d, q.to, q.dur, 0, 0, now); }
-    else if (mode === 'race' && now >= d.t0 + d.dur + d.wait) nextSwim(d, now);
+    else if (mode === 'race' && !d.finishing && now >= d.t0 + d.dur + d.wait) nextSwim(d, now);
   }
 }
 
@@ -379,18 +379,22 @@ function prepareWinner(now) {
   winners = order.slice(0, G); winSet = new Set(winners);
   const losers = n - G;
   let step = losers > 20 ? 1 / losers : lineX / Math.max(1, losers); if (losers < 10) step /= 2;
+  // positions are planned by the FRONT tip of each sled (sleds in back rows are drawn smaller)
+  const hwOf = d => duckGeom(d).s * 1.4 * 1.15 / 2 / W, hwMax = Math.max(...order.map(hwOf));
+  // gift winners share one timing and keep their place order all through the sprint, so they cross in place order
+  const kWin = rnd(1.5, 3.1), sprintFrom = Array.from({ length: G }, () => rnd(.06, lineX / 2)).sort((a, b) => b - a);
+  const space = Math.max(.012, Math.min(hwMax * 1.2, (.97 - lineX - 2.1 * hwMax) / G));
   order.forEach((d, i) => {
-    d.queue = null;
-    const dw = duckGeom(d).s * 1.1 / W;
-    if (i < G) { // gift winners: each crosses the line, ending in finishing order
-      const k = rnd(1.5, 3.1);
-      const space = Math.max(.012, Math.min(dw * .6, (.95 - lineX - dw * .55) / G));
-      moveTo(d, rnd(.04, lineX / 2), left - left / k, 0, 0, now);
-      d.queue = [{ to: lineX + dw * .55 + (G - 1 - i) * space, dur: left / k }];
-    } else {
+    d.queue = null; d.finishing = true; // no more random swimming: the finish is scripted from here
+    const hw = hwOf(d);
+    if (i < G) {
+      moveTo(d, sprintFrom[i] - hw, left - left / kWin, 0, 0, now);
+      d.queue = [{ to: lineX + 2.1 * hwMax + (G - 1 - i) * space - hw, dur: left / kWin }]; // whole sled ends past the line
+    } else { // everyone else stops with the front of their sled behind the line
       const j = i - G + 1;
-      const target = lineX - dw * .6 - step * j + rnd(-step * .25, step * .25);
-      moveTo(d, target, left * rnd(.75, 1), rnd(0, left * .15), 0, now);
+      const target = Math.min(lineX - hw * 1.2 - step * j + rnd(-step * .25, step * .25), lineX - hw * 1.2);
+      const dur = left * rnd(.6, .85);
+      moveTo(d, target, dur, rnd(0, left * .95 - dur), 0, now);
     }
   });
 }
