@@ -325,7 +325,7 @@ function duckGeom(d) {
 }
 
 // ---------- duck motion ----------
-function moveTo(d, to, dur, delay = 0, wait = 0, now = performance.now()) { d.from = d.x; d.to = to; d.t0 = now + delay; d.dur = Math.max(1, dur); d.wait = wait; }
+function moveTo(d, to, dur, delay = 0, wait = 0, now = gnow) { d.from = d.x; d.to = to; d.t0 = now + delay; d.dur = Math.max(1, dur); d.wait = wait; }
 function nextSwim(d, now) {
   let to, dur, delay = 0;
   if (d.first) { to = rnd(.05, .72); dur = rnd(2500, 5000); delay = rnd(0, 900); d.first = false; }
@@ -343,6 +343,37 @@ function updateDuck(d, now) {
 }
 
 // ---------- race control ----------
+// ---------- game clock + finish camera ----------
+let gnow = 0, timeScale = 1, finishAtReal = 0;
+const cam = { x: 0, y: 0, z: 1 }; let camTarget = null, whipUntil = 0, camOn = false;
+function resetCamera() { cam.x = W / 2; cam.y = H / 2; cam.z = 1; camTarget = null; camOn = false; timeScale = 1; }
+const frontOf = d => d.x + duckGeom(d).s * 1.4 * 1.15 / 2 / W;
+function updateCamera(rnow, rdt) {
+  let focus = null;
+  if (mode === 'race' && prepared && ducks.length) {
+    const rem = raceStart + raceMs - gnow;
+    if (rem < 3000) focus = ducks.reduce((a, b) => (frontOf(b) > frontOf(a) ? b : a)); // whoever is closest to the line
+  } else if (mode === 'finish' && winners.length && rnow - finishAtReal < 1500) focus = winners[0];
+  if (focus && focus !== camTarget) { if (camTarget) whipUntil = rnow + 450; camTarget = focus; } // a quick whip-pan when the leader changes
+  camOn = !!focus;
+  let tx = W / 2, ty = H / 2, tz = 1;
+  if (focus) {
+    const g = duckGeom(focus), sw = g.s * 1.4 * 1.15;
+    tz = (gifts > 1 ? 1.6 : 2.1) * (W < 600 ? .85 : 1);
+    tx = focus.x * W + sw * .25; ty = g.y - sw * .3;
+  }
+  const kp = rnow < whipUntil ? 11 : (focus ? 4 : 2.5);
+  cam.x += (tx - cam.x) * Math.min(1, rdt * kp);
+  cam.y += (ty - cam.y) * Math.min(1, rdt * kp);
+  cam.z += (tz - cam.z) * Math.min(1, rdt * (focus ? 3 : 2.5));
+}
+function applyCamera() {
+  if (cam.z < 1.002) return;
+  const hw = W / 2 / cam.z, hh = H / 2 / cam.z; // keep the view inside the scene
+  const cx = clamp(cam.x, hw, W - hw), cy = clamp(cam.y, hh, H - hh);
+  ctx.translate(W / 2, H / 2); ctx.scale(cam.z, cam.z); ctx.translate(-cx, -cy);
+}
+
 function startRace(list) {
   entrants = list.map(x => ({ label: x.label, ch: x.ch, sex: x.sex === 'f' ? 'f' : 'm' }));
   const idx = shuffle(entrants.map((_, i) => i)); // random lane layout
@@ -351,7 +382,7 @@ function startRace(list) {
     x: rnd(.02, .08), from: 0, to: 0, t0: 0, dur: 1, wait: 0, first: true, queue: null, off: false
   }));
   ducks.forEach(d => { d.from = d.to = d.x; });
-  const now = performance.now();
+  const now = gnow; resetCamera();
   raceStart = now; prepMs = Math.min(20000, raceMs - 100); prepared = false;
   order = []; winner = null; winners = []; winSet = new Set(); finish = null; confetti = [];
   gifts = clamp(giftCount, 1, Math.max(1, entrants.length - 1));
@@ -400,7 +431,7 @@ function prepareWinner(now) {
 }
 
 function showWinner(now) {
-  mode = 'finish';
+  mode = 'finish'; finishAtReal = performance.now();
   if (racePrizes.length) { racePrizes.forEach(p => awarded.add(p)); savePrize(); }
   recordWinners();
   sfx.bell();
@@ -410,10 +441,11 @@ function showWinner(now) {
   winners.forEach(w => { const wg = duckGeom(w);
   for (let i = 0; i < per; i++) confetti.push({ x: w.x * W, y: wg.y - wg.s, vx: rnd(-260, 260), vy: rnd(-520, -160), r: rnd(3, 6), c: ['#ff8a1f', '#1f7ae0', '#7bd389', '#ff5d8f', '#ffd23f'][i % 5], a: rnd(0, 6.28), life: rnd(1.6, 2.6) });
   });
-  setTimeout(showResults, 1700);
+  setTimeout(showResults, 2600);
 }
 
 function showResults() {
+  if (mode !== 'finish') return; // race was stopped meanwhile
   mode = 'done';
   const box = $('winBox'); box.innerHTML = '';
   winners.forEach((w, i) => {
@@ -442,7 +474,7 @@ function showResults() {
 }
 
 function stopRace() {
-  mode = 'idle'; ducks = []; finish = null; targetScroll = 0;
+  mode = 'idle'; ducks = []; finish = null; targetScroll = 0; resetCamera();
   $('hud').style.display = 'none'; $('results').classList.add('hidden'); $('setup').classList.remove('hidden');
 }
 
@@ -684,8 +716,15 @@ function drawConfetti(dt) {
 
 // ---------- main loop ----------
 let last = performance.now();
-function frame(now) {
-  const dt = Math.min(.05, (now - last) / 1000); last = now;
+function frame(rnow) {
+  const rdt = Math.min(.05, (rnow - last) / 1000); last = rnow;
+  // slow motion for the last moments before the line, and just after it
+  let tsTarget = 1;
+  if (mode === 'race' && prepared && raceStart + raceMs - gnow < 1200) tsTarget = .3;
+  if (mode === 'finish' && rnow - finishAtReal < 900) tsTarget = .3;
+  timeScale += (tsTarget - timeScale) * Math.min(1, rdt * 7);
+  const dt = rdt * timeScale; gnow += dt * 1000;
+  const now = gnow;
   scrollSpeed += (targetScroll - scrollSpeed) * Math.min(1, dt * 1.5);
   scroll += scrollSpeed * dt;
 
@@ -702,7 +741,9 @@ function frame(now) {
     if (mode === 'race') { const p = clamp((now - finish.t0) / finish.dur, 0, 1); finish.x = finish.from + (finish.to - finish.from) * p; }
   }
   ducks.forEach(d => updateDuck(d, now));
+  updateCamera(rnow, rdt);
 
+  ctx.save(); applyCamera();
   drawBackground(now);
   if (mode === 'race' || mode === 'finish' || mode === 'done') drawStartLine();
   drawFinish();
@@ -713,6 +754,12 @@ function frame(now) {
     drawIdleDucks(now);
   }
   drawConfetti(dt);
+  ctx.restore();
+  if (timeScale < .9) { // slow-motion vignette
+    const a = (1 - timeScale) * .45, vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .35, W / 2, H / 2, Math.max(W, H) * .75);
+    vg.addColorStop(0, 'rgba(10,20,35,0)'); vg.addColorStop(1, `rgba(10,20,35,${a})`);
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  }
   requestAnimationFrame(frame);
 }
 // decorative ducks behind the settings card
